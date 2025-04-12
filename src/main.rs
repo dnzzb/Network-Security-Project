@@ -58,7 +58,7 @@ struct Record {
     target: i32,
     rating: f32,
     timestamp: i64,
-    anomaly: i16, // stored as 0 when inserted
+    anomaly: i16, // inserted as 0 when added
 }
 
 #[derive(Debug)]
@@ -96,16 +96,19 @@ const THRESHOLD_MULTIPLE: f32 = 2.0;
 const FIXED_THRESHOLD: f32 = 2.0;
 
 //
-// Function to process a new interaction and determine if it is anomalous.
-// Updated error type to `Box<dyn Error + Send + Sync>` to satisfy thread safety.
+// Process a new interaction: insert and calculate anomaly status.
+// Updated error type to Box<dyn Error + Send + Sync>
+//
 fn process_interaction(new_int: NewInteraction) -> Result<bool, Box<dyn Error + Send + Sync>> {
     let connection_string = env::var("DATABASE_URL")?;
     let mut client = Client::connect(&connection_string, NoTls)?;
 
+    // Insert the new interaction using the current Unix epoch time.
     let insert_query = "INSERT INTO ratings (source, target, rating, timestamp, anomaly)
                         VALUES ($1, $2, $3, EXTRACT(EPOCH FROM NOW())::bigint, 0)";
     client.execute(insert_query, &[&new_int.source, &new_int.target, &new_int.rating])?;
 
+    // Retrieve historical ratings for the source.
     let query = "SELECT rating FROM ratings WHERE source = $1";
     let rows = client.query(query, &[&new_int.source])?;
 
@@ -126,6 +129,7 @@ fn process_interaction(new_int: NewInteraction) -> Result<bool, Box<dyn Error + 
         0.0
     };
 
+    // Compute anomaly based on dynamic or fixed threshold.
     let is_anomaly = if std_dev == 0.0 {
         new_int.rating.abs() > FIXED_THRESHOLD
     } else {
@@ -143,18 +147,26 @@ async fn add_interaction(new_int: Json<NewInteraction>) -> Json<InteractionRespo
     let new_int = new_int.into_inner();
     let result = task::spawn_blocking(move || process_interaction(new_int)).await;
     match result {
-        Ok(Ok(is_anomaly)) => Json(InteractionResponse {
-            status: if is_anomaly { "Anomaly".into() } else { "Normal".into() },
-            is_anomaly,
-        }),
-        Ok(Err(_e)) => Json(InteractionResponse {
-            status: "Error processing interaction".into(),
-            is_anomaly: false,
-        }),
-        Err(_e) => Json(InteractionResponse {
-            status: "Task join error".into(),
-            is_anomaly: false,
-        }),
+        Ok(Ok(is_anomaly)) => {
+            Json(InteractionResponse {
+                status: if is_anomaly { "Anomaly".into() } else { "Normal".into() },
+                is_anomaly,
+            })
+        }
+        Ok(Err(e)) => {
+            println!("Error processing interaction: {}", e);
+            Json(InteractionResponse {
+                status: format!("Error processing interaction: {}", e),
+                is_anomaly: false,
+            })
+        }
+        Err(e) => {
+            println!("Task join error: {}", e);
+            Json(InteractionResponse {
+                status: format!("Task join error: {}", e),
+                is_anomaly: false,
+            })
+        }
     }
 }
 
@@ -186,7 +198,10 @@ async fn get_stats() -> Json<StatsResponse> {
                 timestamp: record.timestamp,
                 anomaly: record.anomaly,
             };
-            adj_map.entry(record.source).or_insert_with(Vec::new).push(edge);
+            adj_map.entry(record.source)
+                .or_insert_with(Vec::new)
+                .push(edge);
+
             node_stats.entry(record.source).or_default().update(record.rating);
             node_stats.entry(record.target).or_default().update(record.rating);
         }
@@ -268,7 +283,7 @@ async fn get_all_interactions() -> Json<Vec<InteractionRecord>> {
 }
 
 //
-// Serve a separate HTML page for the complete table view.
+// API endpoint to serve a static HTML page for the complete interactions table.
 //
 #[get("/table_page")]
 async fn table_page() -> Option<rocket::fs::NamedFile> {
@@ -276,7 +291,7 @@ async fn table_page() -> Option<rocket::fs::NamedFile> {
 }
 
 //
-// Build and launch the Rocket application with CORS enabled.
+// Build the Rocket application with CORS enabled.
 //
 fn build_rocket() -> Rocket<Build> {
     let allowed_origins = AllowedOrigins::all();
@@ -296,6 +311,6 @@ fn build_rocket() -> Rocket<Build> {
 
 #[launch]
 fn rocket() -> _ {
-    dotenv().ok();
+    dotenv().ok(); // load .env early
     build_rocket()
 }
