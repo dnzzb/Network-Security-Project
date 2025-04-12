@@ -1,0 +1,9 @@
+[package]
+name = "social_graph_from_db"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+postgres = "0.19"  # Adjust version if a newer version is available.
+serde = { version = "1.0", features = ["derive"] }
+dotenv = "0.15"
